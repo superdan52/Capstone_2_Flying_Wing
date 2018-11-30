@@ -1,0 +1,434 @@
+/* 
+ESP8266 Static page WEB server to control Mbed
+Written by: Jim Hamblen
+Edited by: Daniel Zulfic
+Copyright: Jim Hamblen 2015
+Link to author page: https://os.mbed.com/users/4180_1/
+Reference to code: https://os.mbed.com/users/4180_1/notebook/using-the-esp8266-with-the-mbed-lpc1768/
+External Libraries used: DHT11, HCSRO4
+DHT11 Author: Eric Fossum, Link to author: https://os.mbed.com/users/fossum_13/
+Link to DHT11 Library: https://os.mbed.com/users/fossum_13/code/DHT11/docs/5da6f6de3e42/classDht11.html
+HCSRO4 Author: Prabhu Desai, Link to author: https://os.mbed.com/users/prabhuvd/
+Link to HCSRO4 Library: https://os.mbed.com/users/prabhuvd/code/HCSR04/
+*/
+
+
+#include "mbed.h"
+#include "Dht11.h"
+#include "HCSR04.h"
+
+Serial pc(USBTX, USBRX);
+Serial esp(p28, p27); // tx, rx
+Dht11 sensor(p29);
+HCSR04  sonar(p5,p7);
+
+// Standard Mbed LED definitions
+DigitalOut  led1(LED1);      // (PTB18)
+DigitalOut  led2(LED2);    // (PTB19)
+DigitalOut  led3(LED3);     // (PTD1)
+
+// Digital Out and In pins, can be configured to any suitable pin depending on Platform
+DigitalOut  Out1(p6);
+DigitalOut  Out2(p7);
+DigitalOut  Out3(p8);
+DigitalOut  reset(p26);
+
+DigitalIn  In1(p9);
+DigitalIn  In2(p10);
+DigitalIn  In3(p11);
+
+PwmOut speaker(p21);
+AnalogIn   Ain1(p18);
+AnalogIn   Ain2(p19);
+
+Timer t1;
+Timer t2;
+
+struct tm t;
+
+int bufflen, DataRX, count, getcount, replycount, servreq, timeout;
+int bufl, ipdLen, linkID, weberror, webcounter;
+unsigned int dist;
+float temperature, AdcIn, Ht;
+float R1=100000, R2=10000; // resistor values to give a 10:1 reduction of measured AnalogIn voltage
+char Vcc[10];
+char Tempv[10];
+char tempv[10];
+char Hum[10];
+char hum[10];
+char Temp[10];
+char Dist[10];
+char temp[10];
+char webcount[8];
+char lasthit[30];
+char timebuf[30];
+char type[16];
+char type1[16];
+char channel[2];
+char cmdbuff[32];
+char replybuff[1024];
+char webdata[1024]; // This may need to be bigger depending on WEB browser used
+char webbuff[4096];     // Currently using 1986 characters, Increase this if more web page data added
+
+void SendCMD(),getreply(),ReadWebData(),startserver(),sendpage(),SendWEB(),sendcheck();
+void gettime(),gettemp(),getbattery(),setRTC(),beep(),gettempv(),gethum(),getdistance();
+
+// manual set RTC values
+int minute      =00;    // 0-59
+int hour        =12;    // 2-23
+int dayofmonth  =26;    // 1-31
+int month       =8;     // 1-12
+int year        =15;    // last 2 digits
+
+int port        =80;  // set server port
+int SERVtimeout =5;    // set server timeout in seconds in case link breaks.
+
+// Serial Interrupt read ESP data
+void callback()
+{
+    led3=1;
+    while (esp.readable()) {
+        webbuff[count] = esp.getc();
+        count++;
+    }
+    if(strlen(webbuff)>bufflen) {
+        DataRX=1;
+        led3=0;
+    }
+}
+
+int main()
+{
+    reset=0;
+    pc.baud(9600);
+
+    pc.printf("\f\n\r------------ ESP8266 Hardware Reset --------------\n\r");
+    wait(0.5);
+    reset=1;
+    led1=1,led2=0,led3=0;
+    timeout=6000;
+    getcount=500;
+    getreply();
+    esp.baud(115200);   // ESP8266 baudrate. Maximum on KLxx' is 115200, 230400 works on K20 and K22F
+    if (time(NULL) < 1420070400) {
+        setRTC();
+    }
+    beep();
+    startserver();
+
+    while(1) {
+        if(DataRX==1) {
+            ReadWebData();
+            beep();
+            if (servreq == 1 && weberror == 0) {
+                sendpage();
+            }
+            esp.attach(&callback);
+            pc.printf(" IPD Data:\r\n\n Link ID = %d,\r\n IPD Header Length = %d \r\n IPD Type = %s\r\n", linkID, ipdLen, type);
+            pc.printf("\n\n  HTTP Packet: \n\n%s\n", webdata);
+            pc.printf("  Web Characters sent : %d\n\n", bufl);
+            pc.printf("  -------------------------------------\n\n");
+            strcpy(lasthit, timebuf);
+            servreq=0;
+        }
+    }
+}
+// Static WEB page
+void sendpage()
+{
+    gettemp();
+    gettempv();
+    gethum();
+    getbattery();
+    gettime();
+    getdistance();
+ 
+
+// WEB page data
+    strcpy(webbuff, "<!DOCTYPE html>");
+    strcat(webbuff, "<html><head><title>Flying Wing Data Reading</title></head>");
+    strcat(webbuff, "<body>");
+    strcat(webbuff, "<div style=\"text-align:center; background-color:#F4F4F4; color:#00AEDB;\"><h1>Flying Wing</h1>");
+    strcat(webbuff, "<div style=\"text-align:center; background-color:#F4F4F4; color:#00AEDB;\"><h1>Daniel Zulfic, Taylor Matheson, Brian McIntyre</h1>");
+    strcat(webbuff, "<p><form method=\"POST\"><strong> Temp V@Pin:&nbsp&nbsp<input type=\"text\" size=6 value=\"");
+    strcat(webbuff, Tempv);
+    strcat(webbuff, "\"> </sup>V <form method=\"POST\"> <strong> &nbsp&nbspHumidity V@Pin:&nbsp&nbsp<input type=\"text\" size=4 value=\"");
+    strcat(webbuff, Vcc);
+    strcat(webbuff, "\"> </sup>V");
+    strcat(webbuff, "<p><form method=\"POST\"><strong> Temperature:&nbsp&nbsp<input type=\"text\" size=6 value=\"");
+    strcat(webbuff, Temp);
+    strcat(webbuff, "\"> </sup>C <form method=\"POST\"> <strong> &nbsp&nbspHumidity:&nbsp&nbsp<input type=\"text\" size=4 value=\"");
+    strcat(webbuff, Hum);
+    strcat(webbuff, "\"> </sup>C <form method=\"POST\"><strong> Distance:&nbsp&nbsp<input type=\"text\" size=6 value=\"");
+    strcat(webbuff, Dist);
+    strcat(webbuff, "\"> </sup>Cm");
+    strcat(webbuff, "</strong><p><input type=\"submit\" value=\"Refresh\" style=\"background: #3498db;");
+    strcat(webbuff, "background-image:-webkit-linear-gradient(top, #3498db, #2980b9);");
+    strcat(webbuff, "background-image:linear-gradient(to bottom, #3498db, #2980b9);");
+    strcat(webbuff, "-webkit-border-radius:12;border-radius: 12px;font-family: Arial;color:#ffffff;font-size:20px;padding:");
+    strcat(webbuff, "10px 20px 10px 20px; border:solid #103c57 3px;text-decoration: none;");
+    strcat(webbuff, "background: #3cb0fd;");
+    strcat(webbuff, "background-image:-webkit-linear-gradient(top,#3cb0fd,#1a5f8a);");
+    strcat(webbuff, "background-image:linear-gradient(to bottom,#3cb0fd,#1a5f8a);");
+    strcat(webbuff, "text-decoration:none;\"></form></span>");
+    strcat(webbuff, "<li>Use the 'Refresh' button to refresh the data manually.</li>");
+    strcat(webbuff, "</ul>");
+    strcat(webbuff, "</body></html>");
+// end of WEB page data
+    bufl = strlen(webbuff); // get total page buffer length
+    sprintf(cmdbuff,"AT+CIPSEND=%d,%d\r\n", linkID, bufl); // send IPD link channel and buffer character length.
+    timeout=200;
+    getcount=7;
+    SendCMD();
+    getreply();
+    SendWEB();  // send web page
+    memset(webbuff, '\0', sizeof(webbuff));
+    sendcheck();
+}
+
+//  wait for ESP "SEND OK" reply, then close IP to load web page
+void sendcheck()
+{
+    weberror=1;
+    timeout=500;
+    getcount=24;
+    t2.reset();
+    t2.start();
+    while(weberror==1 && t2.read() <5) {
+        getreply();
+        if (strstr(replybuff, "SEND OK") != NULL) {
+            weberror=0;   // wait for valid SEND OK
+        }
+    }
+    if(weberror==1) { // restart connection
+        strcpy(cmdbuff, "AT+CIPMUX=1\r\n");
+        timeout=500;
+        getcount=10;
+        SendCMD();
+        getreply();
+        pc.printf(replybuff);
+        sprintf(cmdbuff,"AT+CIPSERVER=1,%d\r\n", port);
+        timeout=500;
+        getcount=10;
+        SendCMD();
+        getreply();
+        pc.printf(replybuff);
+    } else {
+        sprintf(cmdbuff, "AT+CIPCLOSE=%s\r\n",channel); // close current connection
+        SendCMD();
+        getreply();
+        pc.printf(replybuff);
+    }
+    t2.reset();
+}
+
+// Reads and processes GET and POST web data
+void ReadWebData()
+{
+    wait_ms(200);
+    esp.attach(NULL);
+    count=0;
+    DataRX=0;
+    weberror=0;
+    memset(webdata, '\0', sizeof(webdata));
+    int x = strcspn (webbuff,"+");
+    if(x) {
+        strcpy(webdata, webbuff + x);
+        weberror=0;
+        int numMatched = sscanf(webdata,"+IPD,%d,%d:%s", &linkID, &ipdLen, type);
+        if( strstr(webdata, "led1=1") != NULL ) {
+            led1=1;
+        }
+        if( strstr(webdata, "led1=0") != NULL ) {
+            led1=0;
+        }
+        if( strstr(webdata, "Out1=1") != NULL ) {
+            Out1=1;
+        }
+        if( strstr(webdata, "Out1=0") != NULL ) {
+            Out1=0;
+        }
+        if( strstr(webdata, "Out2=1") != NULL ) {
+            Out2=1;
+        }
+        if( strstr(webdata, "Out2=0") != NULL ) {
+            Out2=0;
+        }
+        if( strstr(webdata, "Out3=1") != NULL ) {
+            Out3=1;
+        }
+        if( strstr(webdata, "Out3=0") != NULL ) {
+            Out3=0;
+        }
+        sprintf(channel, "%d",linkID);
+        if (strstr(webdata, "GET") != NULL) {
+            servreq=1;
+        }
+        if (strstr(webdata, "POST") != NULL) {
+            servreq=1;
+        }
+        webcounter++;
+        sprintf(webcount, "%d",webcounter);
+    } else {
+        memset(webbuff, '\0', sizeof(webbuff));
+        esp.attach(&callback);
+        weberror=1;
+    }
+}
+// Starts and restarts webserver if errors detected.
+void startserver()
+{
+    gettemp();
+    gettempv();
+    gethum();
+    gettime();
+    pc.printf("\n\n RTC time   %s\r\n\n",timebuf);
+    pc.printf("++++++++++ Resetting ESP ++++++++++\r\n");
+    strcpy(cmdbuff,"AT+RST\r\n");
+    timeout=8000;
+    getcount=1000;
+    SendCMD();
+    getreply();
+    pc.printf(replybuff);
+    pc.printf("%d",count);
+    if (strstr(replybuff, "OK") != NULL) {
+        pc.printf("\n++++++++++ Starting Server ++++++++++\r\n");
+        strcpy(cmdbuff, "AT+CIPMUX=1\r\n");  // set multiple connections.
+        timeout=500;
+        getcount=20;
+        SendCMD();
+        getreply();
+        pc.printf(replybuff);
+        sprintf(cmdbuff,"AT+CIPSERVER=1,%d\r\n", port);
+        timeout=500;
+        getcount=20;
+        SendCMD();
+        getreply();
+        pc.printf(replybuff);
+        wait(1);
+        sprintf(cmdbuff,"AT+CIPSTO=%d\r\n",SERVtimeout);
+        timeout=500;
+        getcount=50;
+        SendCMD();
+        getreply();
+        pc.printf(replybuff);
+        wait(5);
+        pc.printf("\n Getting Server IP \r\n");
+        strcpy(cmdbuff, "AT+CIFSR\r\n");
+        timeout=2500;
+        getcount=200;
+        while(weberror==0) {
+            SendCMD();
+            getreply();
+            if (strstr(replybuff, "0.0.0.0") == NULL) {
+                weberror=1;   // wait for valid IP
+            }
+        }
+        pc.printf("\n Enter WEB address (IP) found below in your browser \r\n\n");
+        pc.printf("\n The MAC address is also shown below,if it is needed \r\n\n");
+        replybuff[strlen(replybuff)-1] = '\0';
+        //char* IP = replybuff + 5;
+        sprintf(webdata,"%s", replybuff);
+        pc.printf(webdata);
+        led2=1;
+        bufflen=200;
+        count=0;
+        pc.printf("\n\n++++++++++ Ready ++++++++++\r\n\n");
+        esp.attach(&callback);
+    } else {
+        pc.printf("\n++++++++++ ESP8266 error, check power/connections ++++++++++\r\n");
+        while(1) {}
+    }
+    t2.reset();
+    t2.start();
+    beep();
+}
+// ESP Command data send
+void SendCMD()
+{
+    esp.printf("%s", cmdbuff);
+}
+// Large WEB buffer data send
+void SendWEB()
+{
+    int i=0;
+    if(esp.writeable()) {
+        while(webbuff[i]!='\0') {
+            esp.putc(webbuff[i]);
+            i++;
+        }
+    }
+}
+// Get Command and ESP status replies
+void getreply()
+{
+    memset(replybuff, '\0', sizeof(replybuff));
+    t1.reset();
+    t1.start();
+    replycount=0;
+    while(t1.read_ms()< timeout && replycount < getcount) {
+        if(esp.readable()) {
+            replybuff[replycount] = esp.getc();
+            replycount++;
+        }
+    }
+    t1.stop();
+}
+// Analog in example
+void getbattery()
+{
+    AdcIn=Ain1.read();
+    Ht = (AdcIn*3.3); // set the numeric to the exact MCU analog reference voltage for greater accuracy
+    sprintf(Vcc,"%2.3f",Ht);
+}
+// Temperature example
+void gettempv()
+{
+ 
+    AdcIn=Ain2.read();
+    Ht = (AdcIn*3.3); // set the numeric to the exact MCU analog reference voltage for greater accuracy  
+    sprintf(Tempv,"%2.3f",Ht);
+}
+void gettemp()
+   {
+   sensor.read();
+   sprintf(Temp,"%d",sensor.getCelsius());
+   }
+void gethum()
+   {
+   sensor.read();
+   sprintf(Hum,"%d",sensor.getHumidity());
+   }
+void getdistance()
+   {
+   sonar.setRanges(10, 300);
+   sonar.startMeasurement();
+   wait(1);
+   printf(Dist,"%.1f",sonar.getDistance_cm());    
+   }
+
+// Get RTC time
+void gettime()
+{
+    time_t seconds = time(NULL);
+    strftime(timebuf,50,"%H:%M:%S %a %d %b %y", localtime(&seconds));
+}
+
+void beep()
+{
+    speaker.period(1.0/2000); // 2000hz period
+    speaker = 0.5; //50% duty cycle - max volume
+    wait_ms(60);
+    speaker=0.0; // turn off audio
+}
+
+void setRTC()
+{
+    t.tm_sec = (0);             // 0-59
+    t.tm_min = (minute);        // 0-59
+    t.tm_hour = (hour);         // 0-23
+    t.tm_mday = (dayofmonth);   // 1-31
+    t.tm_mon = (month-1);       // 0-11  "0" = Jan, -1 added for Mbed RCT clock format
+    t.tm_year = ((year)+100);   // year since 1900,  current DCF year + 100 + 1900 = correct year
+    set_time(mktime(&t));       // set RTC clock
+}
