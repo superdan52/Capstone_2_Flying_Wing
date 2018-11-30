@@ -9,8 +9,8 @@ int  count,ended,timeout;
 char buf[1024];
 char snd[255];
 
-char ssid[32] = "Nighthawk X6";     // enter WiFi router ssid inside the quotes
-char pwd [32] = "sladana12301974"; // enter WiFi router password inside the quotes
+char ssid[32] = "***********";     // enter WiFi router ssid inside the quotes
+char pwd [32] = "***********"; // enter WiFi router password inside the quotes
 
 void SendCMD(),getreply(),ESPconfig(),ESPsetbaudrate();
 
